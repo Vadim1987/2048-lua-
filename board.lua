@@ -3,6 +3,9 @@ Board.__index = Board
 
 local utils = require "utils"
 
+local MOVE_TIME = 0.14    -- seconds to complete movement animation
+local MERGE_TIME = 0.14   -- seconds for merge pop effect
+
 function Board.new(rows, cols)
     local self = setmetatable({}, Board)
     self.rows = rows
@@ -12,7 +15,11 @@ function Board.new(rows, cols)
 end
 
 function Board:reset()
+    self.tiles = {}
     self.grid = {}
+    self.merges = {}
+    self.isAnimating = false
+    self.spawnAfterAnimation = false
     for r = 1, self.rows do
         self.grid[r] = {}
         for c = 1, self.cols do
@@ -21,6 +28,26 @@ function Board:reset()
     end
     self:addRandomTile()
     self:addRandomTile()
+    self:syncTiles()
+end
+
+function Board:syncTiles()
+    -- Rebuild tiles from grid (for animation state)
+    self.tiles = {}
+    for r = 1, self.rows do
+        for c = 1, self.cols do
+            local val = self.grid[r][c]
+            if val ~= 0 then
+                table.insert(self.tiles, {
+                    value = val,
+                    r = r, c = c,
+                    screen_r = r, screen_c = c,
+                    anim = nil, -- {from_r, from_c, to_r, to_c, t, tmax, merging}
+                    scale = 1.0,
+                })
+            end
+        end
+    end
 end
 
 function Board:addRandomTile()
@@ -35,99 +62,140 @@ function Board:addRandomTile()
     if #empties == 0 then return end
     local idx = love.math.random(#empties)
     local rc = empties[idx]
-    self.grid[rc[1]][rc[2]] = love.math.random(1,2) * 2 -- spawn 2 or 4
+    self.grid[rc[1]][rc[2]] = love.math.random(1,2)*2 -- spawn 2 or 4
+    self:syncTiles()
 end
 
 function Board:move(direction)
+    if self.isAnimating then return false end
     local moved = false
-    local moved_grid = {}
-    for r = 1, self.rows do
-        moved_grid[r] = {}
-        for c = 1, self.cols do
-            moved_grid[r][c] = self.grid[r][c]
-        end
+    local traversals = utils.buildTraversals(self.rows, self.cols, direction)
+    local mergedThisMove = {}
+    local newGrid = {}
+    for r=1,self.rows do newGrid[r]={} for c=1,self.cols do newGrid[r][c]=self.grid[r][c] end end
+    self.merges = {}
+
+    local function positionAvailable(r, c)
+        return newGrid[r][c] == 0
     end
 
-    local function slideLine(line)
-        local merged = {}
-        local result = {}
-        local last = nil
-        for i, v in ipairs(line) do
-            if v ~= 0 then
-                if last and last == v and not merged[#result] then
-                    result[#result] = v*2
-                    merged[#result] = true
-                    last = nil
+    for _, rc in ipairs(traversals) do
+        local r, c = rc[1], rc[2]
+        local val = self.grid[r][c]
+        if val ~= 0 then
+            local next_r, next_c = r, c
+            local prev_r, prev_c = r, c
+            repeat
+                prev_r, prev_c = next_r, next_c
+                local dr, dc = utils.delta(direction)
+                local test_r, test_c = prev_r + dr, prev_c + dc
+                if test_r >= 1 and test_r <= self.rows and test_c >= 1 and test_c <= self.cols then
+                    if newGrid[test_r][test_c] == 0 then
+                        next_r, next_c = test_r, test_c
+                    elseif newGrid[test_r][test_c] == val and not mergedThisMove[test_r .. "," .. test_c] then
+                        next_r, next_c = test_r, test_c
+                        mergedThisMove[next_r .. "," .. next_c] = true
+                        self.merges[#self.merges+1] = {r=next_r, c=next_c}
+                        break
+                    else
+                        break
+                    end
                 else
-                    table.insert(result, v)
-                    merged[#result] = false
-                    last = v
+                    break
+                end
+            until false
+
+            if (next_r ~= r or next_c ~= c) then
+                moved = true
+                -- Animate: mark tile for movement
+                for _, tile in ipairs(self.tiles) do
+                    if tile.r == r and tile.c == c and tile.value == val then
+                        tile.anim = {
+                            from_r = r, from_c = c,
+                            to_r = next_r, to_c = next_c,
+                            t = 0, tmax = MOVE_TIME,
+                            merging = newGrid[next_r][next_c] == val,
+                        }
+                        break
+                    end
                 end
             end
-        end
-        while #result < #line do
-            table.insert(result, 0)
-        end
-        return result
-    end
 
-    local function reverse(t)
-        local tt = {}
-        for i = #t,1,-1 do table.insert(tt, t[i]) end
-        return tt
-    end
-
-    if direction == "left" then
-        for r=1,self.rows do
-            local line = {}
-            for c=1,self.cols do table.insert(line, self.grid[r][c]) end
-            local sl = slideLine(line)
-            for c=1,self.cols do
-                if self.grid[r][c] ~= sl[c] then moved = true end
-                self.grid[r][c] = sl[c]
+            -- Place in new grid
+            if newGrid[next_r][next_c] == val and not mergedThisMove[next_r .. "," .. next_c] then
+                -- move only, no merge
+                newGrid[next_r][next_c] = val
+            elseif newGrid[next_r][next_c] == val and mergedThisMove[next_r .. "," .. next_c] then
+                -- merging: double value and mark for merge animation
+                newGrid[next_r][next_c] = val * 2
+            elseif newGrid[next_r][next_c] == 0 then
+                newGrid[next_r][next_c] = val
             end
-        end
-    elseif direction == "right" then
-        for r=1,self.rows do
-            local line = {}
-            for c=1,self.cols do table.insert(line, self.grid[r][c]) end
-            local sl = reverse(slideLine(reverse(line)))
-            for c=1,self.cols do
-                if self.grid[r][c] ~= sl[c] then moved = true end
-                self.grid[r][c] = sl[c]
-            end
-        end
-    elseif direction == "up" then
-        for c=1,self.cols do
-            local line = {}
-            for r=1,self.rows do table.insert(line, self.grid[r][c]) end
-            local sl = slideLine(line)
-            for r=1,self.rows do
-                if self.grid[r][c] ~= sl[r] then moved = true end
-                self.grid[r][c] = sl[r]
-            end
-        end
-    elseif direction == "down" then
-        for c=1,self.cols do
-            local line = {}
-            for r=1,self.rows do table.insert(line, self.grid[r][c]) end
-            local sl = reverse(slideLine(reverse(line)))
-            for r=1,self.rows do
-                if self.grid[r][c] ~= sl[r] then moved = true end
-                self.grid[r][c] = sl[r]
+            if not (next_r == r and next_c == c) then
+                newGrid[r][c] = 0
             end
         end
     end
 
+    if moved then
+        self.isAnimating = true
+        self.animationTimer = 0
+        self.animationGrid = newGrid
+    else
+        self:syncTiles()
+    end
     return moved
 end
 
+function Board:update(dt)
+    if not self.isAnimating then return end
+    local still_animating = false
+
+    -- Animate movement
+    for _, tile in ipairs(self.tiles) do
+        if tile.anim then
+            tile.anim.t = math.min(tile.anim.t + dt, tile.anim.tmax)
+            local p = tile.anim.t / tile.anim.tmax
+            tile.screen_r = tile.anim.from_r + (tile.anim.to_r - tile.anim.from_r) * p
+            tile.screen_c = tile.anim.from_c + (tile.anim.to_c - tile.anim.from_c) * p
+            if tile.anim.t < tile.anim.tmax then
+                still_animating = true
+            else
+                tile.screen_r = tile.anim.to_r
+                tile.screen_c = tile.anim.to_c
+                if tile.anim.merging then
+                    tile.scale = 1.2 -- pop effect
+                    tile.merging = true
+                end
+                tile.anim = nil
+            end
+        end
+    end
+
+    -- Animate merge pop
+    for _, tile in ipairs(self.tiles) do
+        if tile.merging then
+            tile.scale = tile.scale - dt * 1.4
+            if tile.scale <= 1.0 then
+                tile.scale = 1.0
+                tile.merging = false
+            else
+                still_animating = true
+            end
+        end
+    end
+
+    if not still_animating then
+        self.isAnimating = false
+        self.grid = self.animationGrid
+        self:syncTiles()
+    end
+end
+
 function Board:isGameOver()
-    -- Any zero?
     for r=1,self.rows do for c=1,self.cols do
         if self.grid[r][c] == 0 then return false end
     end end
-    -- Any move possible?
     for r=1,self.rows do for c=1,self.cols-1 do
         if self.grid[r][c] == self.grid[r][c+1] then return false end
     end end
@@ -138,24 +206,42 @@ function Board:isGameOver()
 end
 
 function Board:draw(x, y, cell)
-    local font = love.graphics.getFont()
     love.graphics.setColor(0.8,0.7,0.5)
     love.graphics.rectangle("fill", x-5, y-5, cell*self.cols+10, cell*self.rows+10, 8,8)
-    for r=1,self.rows do
-        for c=1,self.cols do
-            local val = self.grid[r][c]
-            if val == 0 then
-                love.graphics.setColor(0.9,0.85,0.7)
-            else
-                love.graphics.setColor(0.9,0.7-(val/2048)*0.6,0.3)
-            end
-            love.graphics.rectangle("fill", x + (c-1)*cell, y + (r-1)*cell, cell-4, cell-4, 6,6)
-            if val ~= 0 then
-                love.graphics.setColor(0.1,0.1,0.1)
-                love.graphics.printf(tostring(val), x + (c-1)*cell, y + (r-1)*cell + cell/2 - 12, cell-4, "center")
-            end
+    -- Draw tiles
+    for _, tile in ipairs(self.tiles) do
+        local draw_r = tile.screen_r or tile.r
+        local draw_c = tile.screen_c or tile.c
+        local val = tile.value
+        local scale = tile.scale or 1.0
+        if val == 0 then
+            love.graphics.setColor(0.9,0.85,0.7)
+        else
+            love.graphics.setColor(0.9,0.7-(val/2048)*0.6,0.3)
+        end
+        local w = (cell-4)*scale
+        local h = (cell-4)*scale
+        love.graphics.rectangle("fill",
+            x + (draw_c-1)*cell + (cell-4)/2*(1-scale),
+            y + (draw_r-1)*cell + (cell-4)/2*(1-scale),
+            w, h, 6, 6)
+        if val ~= 0 then
+            love.graphics.setColor(0.1,0.1,0.1)
+            love.graphics.printf(tostring(val),
+                x + (draw_c-1)*cell,
+                y + (draw_r-1)*cell + cell/2 - 12,
+                cell-4, "center")
         end
     end
 end
 
 return Board
+
+      
+  
+               
+
+   
+
+ 
+
