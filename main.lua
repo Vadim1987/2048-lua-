@@ -1,23 +1,33 @@
 local Board = require "board"
 
 function love.load()
-    love.window.setTitle("2048 (minimal, classic)")
+    love.window.setTitle("2048 (Animated)")
     love.window.setMode(400, 480)
     board = Board.new(4, 4)
 end
 
 function love.keypressed(key)
     if key == "escape" then love.event.quit() end
+    if board.isAnimating then return end
 
     if key == "up" or key == "down" or key == "left" or key == "right" then
         if not board:isGameOver() then
             local moved = board:move(key)
             if moved then
-                board:addRandomTile()
+                board:spawnAfterAnimation = true
             end
         end
     elseif key == "r" then
         board:reset()
+    end
+end
+
+function love.update(dt)
+    if board.isAnimating then
+        board:update(dt)
+    elseif board.spawnAfterAnimation then
+        board:addRandomTile()
+        board.spawnAfterAnimation = false
     end
 end
 
