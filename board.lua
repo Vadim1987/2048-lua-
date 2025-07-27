@@ -3,8 +3,8 @@ Board.__index = Board
 
 local utils = require "utils"
 
-local MOVE_TIME = 0.14    -- seconds to complete movement animation
-local MERGE_TIME = 0.14   -- seconds for merge pop effect
+local MOVE_TIME = 0.14    -- Time for tile slide animation (seconds)
+local MERGE_TIME = 0.14   -- Time for merge "pop" animation
 
 function Board.new(rows, cols)
     local self = setmetatable({}, Board)
@@ -14,12 +14,17 @@ function Board.new(rows, cols)
     return self
 end
 
+-- Resets the board to a new game, initializes history and replay state
 function Board:reset()
     self.tiles = {}
     self.grid = {}
     self.merges = {}
     self.isAnimating = false
     self.spawnAfterAnimation = false
+    self.history = {}      -- Move history stack for undo and replay
+    self.replayMode = false
+    self.replayIndex = 1
+    self.replayTimer = 0
     for r = 1, self.rows do
         self.grid[r] = {}
         for c = 1, self.cols do
@@ -29,10 +34,35 @@ function Board:reset()
     self:addRandomTile()
     self:addRandomTile()
     self:syncTiles()
+    self:pushHistory() -- Save initial state
 end
 
+-- Deep-copies current grid and adds it to history
+function Board:pushHistory()
+    local gridCopy = {}
+    for r=1,self.rows do
+        gridCopy[r] = {}
+        for c=1,self.cols do
+            gridCopy[r][c] = self.grid[r][c]
+        end
+    end
+    table.insert(self.history, gridCopy)
+end
+
+-- Restores the previous state from history (undo)
+function Board:undo()
+    if #self.history > 1 and not self.isAnimating then
+        table.remove(self.history) -- Remove current state
+        local last = self.history[#self.history]
+        for r=1,self.rows do for c=1,self.cols do
+            self.grid[r][c] = last[r][c]
+        end end
+        self:syncTiles()
+    end
+end
+
+-- Synchronizes tiles for animation from the grid
 function Board:syncTiles()
-    -- Rebuild tiles from grid (for animation state)
     self.tiles = {}
     for r = 1, self.rows do
         for c = 1, self.cols do
@@ -50,6 +80,7 @@ function Board:syncTiles()
     end
 end
 
+-- Adds a new random tile (2 or 4) to an empty cell
 function Board:addRandomTile()
     local empties = {}
     for r = 1, self.rows do
@@ -66,6 +97,7 @@ function Board:addRandomTile()
     self:syncTiles()
 end
 
+-- Main move logic: slides and merges tiles, marks tiles for animation
 function Board:move(direction)
     if self.isAnimating then return false end
     local moved = false
@@ -123,10 +155,8 @@ function Board:move(direction)
 
             -- Place in new grid
             if newGrid[next_r][next_c] == val and not mergedThisMove[next_r .. "," .. next_c] then
-                -- move only, no merge
                 newGrid[next_r][next_c] = val
             elseif newGrid[next_r][next_c] == val and mergedThisMove[next_r .. "," .. next_c] then
-                -- merging: double value and mark for merge animation
                 newGrid[next_r][next_c] = val * 2
             elseif newGrid[next_r][next_c] == 0 then
                 newGrid[next_r][next_c] = val
@@ -147,6 +177,7 @@ function Board:move(direction)
     return moved
 end
 
+-- Handles tile animation (sliding and merge "pop")
 function Board:update(dt)
     if not self.isAnimating then return end
     local still_animating = false
@@ -164,7 +195,7 @@ function Board:update(dt)
                 tile.screen_r = tile.anim.to_r
                 tile.screen_c = tile.anim.to_c
                 if tile.anim.merging then
-                    tile.scale = 1.2 -- pop effect
+                    tile.scale = 1.2 -- merge "pop" effect
                     tile.merging = true
                 end
                 tile.anim = nil
@@ -172,7 +203,7 @@ function Board:update(dt)
         end
     end
 
-    -- Animate merge pop
+    -- Animate merge pop (scale)
     for _, tile in ipairs(self.tiles) do
         if tile.merging then
             tile.scale = tile.scale - dt * 1.4
@@ -192,6 +223,7 @@ function Board:update(dt)
     end
 end
 
+-- Checks if there are any possible moves left
 function Board:isGameOver()
     for r=1,self.rows do for c=1,self.cols do
         if self.grid[r][c] == 0 then return false end
@@ -205,6 +237,7 @@ function Board:isGameOver()
     return true
 end
 
+-- Draws the board and all animated tiles
 function Board:draw(x, y, cell)
     love.graphics.setColor(0.8,0.7,0.5)
     love.graphics.rectangle("fill", x-5, y-5, cell*self.cols+10, cell*self.rows+10, 8,8)
@@ -237,11 +270,12 @@ end
 
 return Board
 
-      
+                     
+        
   
-               
+        
 
-   
+
 
  
 
